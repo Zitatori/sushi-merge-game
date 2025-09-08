@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>寿司スイカゲーム風（Sushi Merge）MVP</title>
+<style>
+  :root{--bg:#0b0f14;--panel:#10161d;--ink:#e6edf3;--muted:#9da9b3;--accent:#ff385c}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:radial-gradient(1200px 700px at 50% -200px,#1a2230 0%,#0b0f14 60%);color:var(--ink);font-family:ui-sans-serif,system-ui,"Noto Sans JP",Segoe UI,Roboto,Helvetica,Arial}
+  header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #202a36;background:rgba(16,22,29,.6);backdrop-filter:blur(6px);position:sticky;top:0}
+  h1{font-size:16px;margin:0}
+  .wrap{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px}
+  .panel{background:rgba(16,22,29,.65);border:1px solid #202a36;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+  .panel h2{font-size:14px;margin:10px 12px;color:#c7d1db}
+  .panel .content{padding:12px}
+  .stat{display:flex;gap:10px;align-items:center}
+  .badge{padding:4px 8px;border:1px solid #2a3545;border-radius:999px;color:#dfe7ef;font-size:12px}
+  .btn{border:1px solid #2a3545;background:#131a22;color:#e6edf3;padding:8px 12px;border-radius:12px;cursor:pointer}
+  .btn:active{transform:translateY(1px)}
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+canvas {
+  width: 2000px;
+  height: 3000px;
+  max-width: 100%;
+  border-radius: 14px;
+  border: 1px solid #202a36;
+  background: linear-gradient(#1e2836,#121821);
+}
+  .hint{color:var(--muted);font-size:12px;line-height:1.5}
+  .pair{display:flex;align-items:center;gap:8px}
+  .nextDot{width:26px;height:26px;border-radius:50%;border:1px solid #2a3545;display:inline-block}
+  .range{width:100%}
+  @media (max-width: 980px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🍣 寿司スイカゲーム風（Sushi Merge）MVP</h1>
+  <div class="stat">
+    <span class="badge">お会計：<b id="score">0</b> 円</span>
+    <span class="badge">次の寿司：<span id="nextName">—</span> <span id="nextDot" class="nextDot"></span></span>
+    <button class="btn" id="restart">リセット</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>設定 / 使い方</h2>
+    <div class="content">
+      <div class="grid">
+        <div class="pair"><label>重力</label><input id="gravity" type="range" min="600" max="2000" step="50" value="1100" class="range"></div>
+        <div class="pair"><label>反発係数</label><input id="bounce" type="range" min="0" max="1" step="0.05" value="0.2" class="range"></div>
+        <div class="pair"><label>出現間隔(ms)</label><input id="cooldown" type="range" min="150" max="1200" step="50" value="400" class="range"></div>
+        <div class="pair"><label>BGM/SE</label>
+          <select id="se">
+            <option value="off">なし</option>
+            <option value="beep">ビープ</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint">マウス（またはタップ）で上部の射出口を左右に動かし、クリック/タップで寿司を落とします。同じ寿司同士がくっつくと上位の寿司に合体。画面上部の赤い線を超えて積み上がるとゲームオーバー。</p>
+      <p class="hint"><b>画像を差し替えるには：</b> 下の <code>ASSETS</code> で各レベルの <code>image</code> をあなたの寿司PNG(背景透過推奨)のURLに入れ替えてください。円形にトリミングして描画されます。</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>プレイ画面</h2>
+    <div class="content">
+      <canvas id="game" width="480" height="720"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ====== ASSETS: レベル定義（小→大） ======
+  // image: 透過PNGのURL（未指定ならグラデ塗り）
+  // value: スコア加算（円）
+  const LEVELS = [
+    {name:'トロたく巻き', r:16, value:10, color:'#86c06a', image:'static/Torotaku.png'},
+    {name:'イクラ',          r:20, value:30,  color:'#f7b7a1', image:'static/Ikura.png'},
+    {name:'サーモン',      r:26, value:90,  color:'#ff8247', image:'static/Sarmon.png'},
+    {name:'ホタテ',        r:34, value:200, color:'#d83a3a', image:'static/Hotate.png'},
+    {name:'大トロ',        r:44, value:500, color:'#ff6b88', image:'static/Otoro.png'},
+    {name:'うに軍艦',      r:58, value:1200,color:'#f6b21a', image:'static/Uni.png'},
+    {name:'えんがわ',        r:78, value:3000,color:'#b8874b', image:'static/Engawa.png'},
+    {name:'巨大寿司',      r:110,value:9999,color:'#c71f37', image:'static/Oke.png'}, // 到達すると実質フィナーレ
+  ];
+
+  // ====== 音（簡易） ======
+  const SE = {
+    play(name){ if(document.getElementById('se').value==='off') return; if(name==='merge') beep(300); if(name==='drop') beep(180); if(name==='gameover') beep(80); },
+  };
+  function beep(freq){
+    try{ const a=new (window.AudioContext||window.webkitAudioContext)();
+      const o=a.createOscillator(); const g=a.createGain(); o.type='sine'; o.frequency.value=freq; o.connect(g); g.connect(a.destination); g.gain.value=.03; o.start(); setTimeout(()=>{o.stop(); a.close();},120);
+    }catch(e){}
+  }
+
+  // ====== 物理＆ゲーム状態 ======
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const WALL = 14; // 壁厚
+  const TOP_SAFE = 110; // この高さより上で積むと危険
+
+  let gravity = +document.getElementById('gravity').value; // px/s^2
+  let bounce = +document.getElementById('bounce').value;   // 反発
+  let cooldownMs = +document.getElementById('cooldown').value;
+
+  document.getElementById('gravity').addEventListener('input', e=>gravity=+e.target.value);
+  document.getElementById('bounce').addEventListener('input', e=>bounce=+e.target.value);
+  document.getElementById('cooldown').addEventListener('input', e=>cooldownMs=+e.target.value);
+
+  const nextNameEl = document.getElementById('nextName');
+  const nextDotEl = document.getElementById('nextDot');
+  const scoreEl = document.getElementById('score');
+
+
+  let rng = (min,max)=>Math.random()*(max-min)+min;
+  let balls = []; // {x,y,vx,vy,r,level,id,mergedCooldown}
+  let nextLevel = 0; // 次に落とす寿司レベル（小さめを出しやすく）
+  let launcherX = W/2; // 射出口
+  let canDrop = true;
+  let score = 0;
+  let gameOver = false;
+  let lastTime = performance.now();
+
+  // 画像のプリロード（必要なら）
+  LEVELS.forEach(l=>{ if(l.image){ const img=new Image(); img.src=l.image; l._img=img; } });
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    launcherX = Math.min(W-WALL-10, Math.max(WALL+10, (e.clientX-rect.left)/rect.width*W));
+  });
+  canvas.addEventListener('touchmove', e => { const t=e.touches[0]; if(!t) return; const rect=canvas.getBoundingClientRect(); launcherX = Math.min(W-WALL-10, Math.max(WALL+10, (t.clientX-rect.left)/rect.width*W)); });
+  canvas.addEventListener('mousedown', tryDrop);
+  canvas.addEventListener('touchstart', tryDrop, {passive:true});
+  document.getElementById('restart').addEventListener('click', reset);
+
+  function reset(){ balls=[]; score=0; scoreEl.textContent='0'; gameOver=false; nextLevel = pickNextLevel(); updateNextUI(); }
+
+  function tryDrop(){ if(!canDrop || gameOver) return; canDrop=false; setTimeout(()=>canDrop=true, cooldownMs); dropBall(launcherX, TOP_SAFE - 50, nextLevel); SE.play('drop'); nextLevel = pickNextLevel(); updateNextUI(); }
+
+  function pickNextLevel(){ // 小さめが出やすい分布
+    const weights = LEVELS.map((_,i)=> 1/Math.pow(1.6,i+1));
+    let s=weights.reduce((a,b)=>a+b,0), r=Math.random()*s, acc=0; for(let i=0;i<weights.length-2;i++){ acc+=weights[i]; if(r<=acc) return i; } return 1; }
+
+  function updateNextUI(){ nextNameEl.textContent = LEVELS[nextLevel].name; nextDotEl.style.background = LEVELS[nextLevel].color; }
+
+  function dropBall(x,y,level){
+    const L = LEVELS[level];
+    balls.push({id:crypto.randomUUID(), x, y, vx:0, vy:0, r:L.r, level, mergedCooldown:0});
+  }
+
+  function step(dt){
+    // 重力
+    for(const b of balls){ b.vy += gravity*dt; b.mergedCooldown = Math.max(0, b.mergedCooldown - dt); }
+
+    // 位置更新
+    for(const b of balls){ b.x += b.vx*dt; b.y += b.vy*dt; }
+
+    // 壁/床との衝突
+    for(const b of balls){
+      // 左右壁
+      if(b.x - b.r < WALL){ b.x = WALL + b.r; b.vx = Math.abs(b.vx) * (1-bounce) ; }
+      if(b.x + b.r > W - WALL){ b.x = W - WALL - b.r; b.vx = -Math.abs(b.vx) * (1-bounce); }
+      // 床
+      const floorY = H - WALL;
+      if(b.y + b.r > floorY){ b.y = floorY - b.r; b.vy = -Math.abs(b.vy) * bounce; b.vx *= 0.98; }
+    }
+
+    // ボール同士の衝突＆合体
+    for(let i=0;i<balls.length;i++){
+      for(let j=i+1;j<balls.length;j++){
+        const a=balls[i], c=balls[j];
+        const dx=c.x-a.x, dy=c.y-a.y, dist=Math.hypot(dx,dy), minDist=a.r+c.r;
+        if(dist < minDist){
+          // 衝突解消（単純な押し戻し）
+          const nx = dx/(dist||1), ny = dy/(dist||1);
+          const overlap = (minDist - dist) || 0.01;
+          a.x -= nx*overlap*0.5; a.y -= ny*overlap*0.5;
+          c.x += nx*overlap*0.5; c.y += ny*overlap*0.5;
+          // 速度（簡易反発）
+          const relVx = c.vx - a.vx, relVy = c.vy - a.vy;
+          const relN = relVx*nx + relVy*ny;
+          const imp = -(1+bounce) * relN * 0.5;
+          a.vx -= imp*nx; a.vy -= imp*ny; c.vx += imp*nx; c.vy += imp*ny;
+
+          // ===== 合体判定 =====
+          if(a.level===c.level && a.level<LEVELS.length-1 && a.mergedCooldown===0 && c.mergedCooldown===0){
+            const relSpeed = Math.hypot(relVx,relVy);
+            if(relSpeed < 220){ // ゆっくり接触なら合体
+              mergeBalls(i,j); j=i; // 配列入れ替わり対策で再走査
+            }
+          }
+        }
+      }
+    }
+
+  }
+
+  function mergeBalls(i,j){
+    const a=balls[i], c=balls[j];
+    const nx = (a.x*c.r + c.x*a.r) / (a.r + c.r);
+    const ny = (a.y*c.r + c.y*a.r) / (a.r + c.r);
+    const nvx = (a.vx*c.r + c.vx*a.r) / (a.r + c.r);
+    const nvy = (a.vy*c.r + c.vy*a.r) / (a.r + c.r);
+    const nextLevel = a.level + 1;
+    // スコア
+    score += LEVELS[nextLevel].value;
+    scoreEl.textContent = score.toLocaleString();
+    SE.play('merge');
+
+    // 新ボール作成
+    const nb = {id:crypto.randomUUID(), x:nx, y:ny, vx:nvx, vy:nvy*0.6, r:LEVELS[nextLevel].r, level:nextLevel, mergedCooldown:0.2};
+    // 古い2つを削除
+    const first = Math.min(i,j), second = Math.max(i,j);
+    balls.splice(second,1); balls.splice(first,1);
+    // 追加
+    balls.push(nb);
+  }
+
+  function draw(){
+  // 背景
+  ctx.clearRect(0,0,W,H);
+
+  // プレイエリア
+  ctx.save();
+
+  // 壁
+  ctx.fillStyle = '#223041';
+  ctx.fillRect(0,0,WALL,H);           // 左
+  ctx.fillRect(W-WALL,0,WALL,H);      // 右
+  ctx.fillRect(0,H-WALL,W,WALL);      // 底
+
+  // 危険ライン
+  ctx.strokeStyle = '#ff3b30';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8,8]);
+  ctx.beginPath();
+  ctx.moveTo(WALL, TOP_SAFE);
+  ctx.lineTo(W-WALL, TOP_SAFE);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 発射口
+  ctx.fillStyle = '#2b3a4b';
+  ctx.fillRect(launcherX-24, 0, 48, WALL);
+
+  // === 次に落ちる寿司のプレビュー（安全版） ===
+  if (!gameOver && typeof nextLevel === 'number') {
+    const L = LEVELS[nextLevel];
+    if (L) {
+      // 画像が後から設定された場合でも遅延ロード
+      if (L.image && !L._img) {
+        L._img = new Image();
+        L._img.src = L.image;
+      }
+      const r = L.r || 20;
+      // 画面内に確実に収まるY座標（上端から少し下）
+      const y = Math.max(WALL + r + 8, TOP_SAFE - 50);
+
+      ctx.save();
+      ctx.globalAlpha = 0.6;
+
+      if (L._img && L._img.complete) {
+        ctx.drawImage(L._img, launcherX - r, y - r, r*2, r*2);
+      } else {
+        ctx.fillStyle = L.color || '#888';
+        ctx.beginPath();
+        ctx.arc(launcherX, y, r, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      ctx.restore(); // globalAlpha を戻す
+    }
+  }
+
+  // 実際の寿司
+  for (const b of balls) { drawBall(b); }
+
+  // ゲームオーバー表示
+  if (gameOver){
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font = '700 28px system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.fillText('巨大寿司、爆誕。', W/2, H/2 - 10);
+    ctx.font = '500 16px system-ui, sans-serif';
+    ctx.fillText('リセットで再挑戦', W/2, H/2 + 20);
+  }
+
+  ctx.restore();
+}
+
+
+  function drawBall(b){
+    const L = LEVELS[b.level];
+    const x=b.x, y=b.y, r=b.r;
+    if(L._img && L._img.complete){
+      // 円形にクリップして画像を描く
+      ctx.save();
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.closePath(); ctx.clip();
+      // 画像を円にフィットさせて描画
+      const s = r*2; ctx.drawImage(L._img, x-r, y-r, s, s);
+      ctx.restore();
+      // 縁取り
+      ctx.strokeStyle='rgba(255,255,255,.65)'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(x,y,r-1,0,Math.PI*2); ctx.stroke();
+    } else {
+      // グラデ塗り（画像未設定時）
+      const grad = ctx.createRadialGradient(x - r*0.3, y - r*0.4, r*0.2, x, y, r);
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.15, '#ffffff');
+      grad.addColorStop(0.16, L.color);
+      grad.addColorStop(1, shade(L.color,-20));
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(x,y,r-1,0,Math.PI*2); ctx.stroke();
+    }
+  }
+
+  function shade(hex, amt){
+    const c = hex.replace('#',''); const num=parseInt(c,16);
+    let r=(num>>16)+amt, g=((num>>8)&0xff)+amt, b=(num&0xff)+amt;
+    r=Math.max(0,Math.min(255,r)); g=Math.max(0,Math.min(255,g)); b=Math.max(0,Math.min(255,b));
+    return '#' + (1<<24 | r<<16 | g<<8 | b).toString(16).slice(1);
+  }
+
+  function loop(t){
+    const dt = Math.min(1/30, (t - lastTime)/1000); lastTime = t;
+    step(dt); draw();
+    requestAnimationFrame(loop);
+  }
+
+  function init(){ reset(); requestAnimationFrame(loop); }
+  init();
+})();
+</script>
+</body>
+</html>
